@@ -1,0 +1,496 @@
+Code.gs
+
+/**
+* 商品交換チケット管理アプリ - リアルタイム在庫管理対応版 */
+
+var SCRIPT_PROP = PropertiesService.getScriptProperties();
+var SHEET_ID = SpreadsheetApp.getActiveSpreadsheet().getId();
+var SHEET_TICKETS = 'Tickets';
+var SHEET_INVENTORY = 'Inventory';
+var SHEET_SETTINGS = 'Settings';
+
+// 列インデックス (Inventoryシート用)
+var COL_INV_ITEM = 0;
+var COL_INV_TOTAL = 1;
+var COL_INV_RESERVED = 2;
+var COL_INV_PRICE = 3;
+var COL_INV_BUFFER = 4; // 作り置きストック列
+
+// チケットシート列
+var COL_TOKEN = 0;
+var COL_TICKET_NO = 1;
+var COL_ITEM = 2;
+var COL_PRICE = 3;
+var COL_NAME = 4;
+var COL_EMAIL = 5;
+var COL_PHONE = 6;
+var COL_ISSUED_AT = 7;
+var COL_REDEEMED = 8;
+var COL_REDEEMED_AT = 9;
+var COL_DELIVERY_STATUS = 10; 
+
+function doGet(e) {
+  var action = e.parameter.action;
+  var template;
+  
+  if (action === 'kitchen') {
+    template = HtmlService.createTemplateFromFile('Kitchen');
+  } else if (action === 'scanner') {
+    template = HtmlService.createTemplateFromFile('Scanner');
+  } else if (action === 'call_display') {
+    template = HtmlService.createTemplateFromFile('CallDisplay');
+  } else {
+    template = HtmlService.createTemplateFromFile('Index');
+    template.inventoryList = getAvailableInventory();
+  }
+
+  return template.evaluate()
+    .setTitle('商品交換チケット発行')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+// --- 1. 注文処理 (作り置き引当 + 重複チェック機能付き) ---
+function processTicketIssue(formObject) {
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(10000); } catch (e) { return { success: false, message: '混雑中です。再試行してください。' }; }
+
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var inventorySheet = ss.getSheetByName(SHEET_INVENTORY);
+  var ticketSheet = ss.getSheetByName(SHEET_TICKETS);
+  var settings = getSettingsMap();
+  var webAppUrl = settings['web_app_url'] || ScriptApp.getService().getUrl();
+
+  // --- 【追加】重複注文チェックロジック開始 ---
+  // 設定シートで「enable_duplicate_check」が「TRUE」の場合のみ発動
+  if (String(settings['enable_duplicate_check']).toUpperCase() === 'TRUE') {
+    var ticketData = ticketSheet.getDataRange().getValues();
+    // 顧客情報の重複チェック (Email または Phone)
+    for (var i = 1; i < ticketData.length; i++) {
+      var existingEmail = String(ticketData[i][COL_EMAIL]).trim();
+      var existingPhone = String(ticketData[i][COL_PHONE]).trim();
+      
+      // 同じメールアドレス または 同じ電話番号 が既に存在する場合
+      if (existingEmail === String(formObject.email).trim() || existingPhone === String(formObject.phone).trim()) {
+         lock.releaseLock();
+         return { 
+           success: false, 
+           message: 'お一人様1回限りの注文となります。\n既に登録されているメールアドレスまたは電話番号です。' 
+         };
+      }
+    }
+  }
+  // --- 重複注文チェックロジック終了 ---
+
+  try {
+    var inventoryMap = getInventoryMap(inventorySheet);
+    var invData = inventorySheet.getDataRange().getValues();
+    
+    var totalCost = 0;
+    var totalItems = 0;
+    var orderItems = []; 
+    var summaryItems = {}; 
+
+    // 在庫チェックとストック引当計算
+    for (var i = 0; i < formObject.orders.length; i++) {
+      var order = formObject.orders[i];
+      var qty = Number(order.qty);
+      if (qty <= 0) continue;
+      
+      var inv = inventoryMap[order.item];
+      if (!inv || (inv.total_stock - inv.reserved) < qty) {
+        return { success: false, message: order.item + ' の販売枠が足りません。' };
+      }
+
+      var readyCount = 0;
+      if (inv.buffer > 0) {
+        if (inv.buffer >= qty) {
+          readyCount = qty;
+          inv.buffer -= qty;
+        } else {
+          readyCount = inv.buffer;
+          inv.buffer = 0;
+        }
+      }
+
+      for(var j=0; j<qty; j++) {
+        var status = (j < readyCount) ? '済' : '未';
+        orderItems.push({ item: order.item, price: inv.price, status: status });
+        inv.reserved += 1;
+      }
+      
+      if (!summaryItems[order.item]) summaryItems[order.item] = { price: inv.price, qty: 0 };
+      summaryItems[order.item].qty += qty;
+
+      totalCost += (inv.price * qty);
+      totalItems += qty;
+    }
+
+    if (totalItems === 0) return { success: false, message: '商品が選択されていません' };
+
+    var commonToken = generateRandomToken(32);
+    var orderNum = getNextOrderNumber(); 
+    var ticketNo = "No." + orderNum;
+    var redeemUrl = webAppUrl + "?action=redeem&ticket=" + commonToken;
+
+    for (var k = 1; k < invData.length; k++) {
+      var itemName = invData[k][COL_INV_ITEM];
+      if (inventoryMap[itemName]) {
+        inventorySheet.getRange(k + 1, COL_INV_RESERVED + 1).setValue(inventoryMap[itemName].reserved);
+        inventorySheet.getRange(k + 1, COL_INV_BUFFER + 1).setValue(inventoryMap[itemName].buffer);
+      }
+    }
+
+    var ticketRows = orderItems.map(t => [
+      commonToken, ticketNo, t.item, t.price,
+      formObject.name, formObject.email, formObject.phone,
+      new Date(), '未', '', t.status, 
+      formObject.method
+    ]);
+    ticketRows.forEach(row => ticketSheet.appendRow(row));
+
+    if (formObject.method === 'email') {
+      var qrApiUrl = "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=" + encodeURIComponent(redeemUrl);
+      try {
+        MailApp.sendEmail({
+          to: formObject.email,
+          subject: '【チケット発行】整理番号: ' + ticketNo,
+          htmlBody: buildEmailBody(formObject, ticketNo, summaryItems, totalCost, qrApiUrl)
+        });
+      } catch (e) { /* ignore */ }
+    }
+
+    return { 
+      success: true, 
+      message: 'チケットを発行しました',
+      ticketNo: ticketNo,
+      totalCost: totalCost,
+      summary: summaryItems,
+      redeemUrl: redeemUrl 
+    };
+
+  } catch (e) {
+    return { success: false, message: 'Error: ' + e.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// --- 2. キッチン用：ログインチェック ---
+function checkStaffLogin(pass) {
+  return { success: checkPass(pass) };
+}
+
+// --- 3. キッチン用：状況取得 (作り置き数も含める) ---
+function getKitchenStatus() {
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var ticketSheet = ss.getSheetByName(SHEET_TICKETS);
+  var invSheet = ss.getSheetByName(SHEET_INVENTORY);
+  
+  var ticketData = ticketSheet.getDataRange().getValues();
+  var invMap = getInventoryMap(invSheet);
+  
+  var statusMap = {}; 
+  // 全商品の初期化
+  Object.keys(invMap).forEach(key => {
+    statusMap[key] = { waiting: 0, ready: 0, buffer: invMap[key].buffer };
+  });
+
+  // チケット集計
+  for (var i = 1; i < ticketData.length; i++) {
+    var item = ticketData[i][COL_ITEM];
+    var status = ticketData[i][COL_DELIVERY_STATUS];
+    
+    if (statusMap[item]) {
+      if (status === '未') {
+        statusMap[item].waiting++;
+      } else if (status === '済') {
+        statusMap[item].ready++;
+      }
+    }
+  }
+  
+  return Object.keys(statusMap).map(key => {
+    return { item: key, stats: statusMap[key] };
+  });
+}
+
+// --- 4. キッチン用：完成登録 (自動バッファ登録) ---
+function registerCookedItems(item, count, pass) {
+  if (!checkPass(pass)) return { success: false, message: 'パスワード不一致' };
+  
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(5000); } catch(e) { return {success:false, message:'処理中'}; }
+
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var ticketSheet = ss.getSheetByName(SHEET_TICKETS);
+  var invSheet = ss.getSheetByName(SHEET_INVENTORY);
+  
+  var ticketData = ticketSheet.getDataRange().getValues();
+  var updatedCount = 0;
+  var remainCount = count; // 完成した数
+
+  // 1. 待機中の注文があれば割り当てる
+  for (var i = 1; i < ticketData.length; i++) {
+    if (remainCount <= 0) break;
+    
+    if (ticketData[i][COL_ITEM] === item && ticketData[i][COL_DELIVERY_STATUS] === '未') {
+      ticketSheet.getRange(i + 1, COL_DELIVERY_STATUS + 1).setValue('済');
+      updatedCount++;
+      remainCount--;
+    }
+  }
+  
+  // 2. 余った分(remainCount)があれば、InventoryのBufferに追加する
+  var bufferAdded = 0;
+  if (remainCount > 0) {
+    var invData = invSheet.getDataRange().getValues();
+    for (var j = 1; j < invData.length; j++) {
+      if (invData[j][COL_INV_ITEM] === item) {
+        var currentBuffer = Number(invData[j][COL_INV_BUFFER] || 0);
+        invSheet.getRange(j + 1, COL_INV_BUFFER + 1).setValue(currentBuffer + remainCount);
+        bufferAdded = remainCount;
+        break;
+      }
+    }
+  }
+  
+  lock.releaseLock();
+  
+  var msg = '';
+  if (updatedCount > 0) msg += `${updatedCount}件の注文を引き当て完了。`;
+  if (bufferAdded > 0) msg += ` ${bufferAdded}個を作り置き在庫に登録しました。`;
+  
+  return { success: true, message: msg };
+}
+
+// --- 5. 呼出ディスプレイ用 (変更なし) ---
+function getCallList() {
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var sheet = ss.getSheetByName(SHEET_TICKETS);
+  var data = sheet.getDataRange().getValues();
+  
+  var callGroups = {}; 
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][COL_DELIVERY_STATUS] === '済') {
+      var no = data[i][COL_TICKET_NO];
+      if (!callGroups[no]) {
+        callGroups[no] = { no: no, name: data[i][COL_NAME], items: [] };
+      }
+      callGroups[no].items.push(data[i][COL_ITEM]);
+    }
+  }
+  
+  return Object.keys(callGroups).map(k => {
+    return {
+      no: callGroups[k].no,
+      name: callGroups[k].name,
+      items: countItems(callGroups[k].items).join(', ')
+    };
+  });
+}
+
+// --- 6. QRスキャン処理 (変更なし) ---
+function processQrScan(token, pass) {
+  if (!checkPass(pass)) return { success: false, message: 'パスワード不一致' };
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(5000); } catch(e) { return {success:false}; }
+
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var sheet = ss.getSheetByName(SHEET_TICKETS);
+  var inventorySheet = ss.getSheetByName(SHEET_INVENTORY);
+  var data = sheet.getDataRange().getValues();
+  
+  var targetRows = [];
+  var itemsToReduce = {}; 
+  var customerName = "", ticketNo = "";
+
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][COL_TOKEN] === token) {
+      if (data[i][COL_DELIVERY_STATUS] !== '完') {
+        targetRows.push(i + 1);
+        var item = data[i][COL_ITEM];
+        itemsToReduce[item] = (itemsToReduce[item] || 0) + 1;
+        if (!customerName) customerName = data[i][COL_NAME];
+        if (!ticketNo) ticketNo = data[i][COL_TICKET_NO];
+      }
+    }
+  }
+  
+  if (targetRows.length === 0) {
+    lock.releaseLock();
+    return { success: false, message: '未受渡のチケットがありません' };
+  }
+  
+  targetRows.forEach(rowIdx => {
+    sheet.getRange(rowIdx, COL_DELIVERY_STATUS + 1).setValue('完');
+    sheet.getRange(rowIdx, COL_REDEEMED + 1).setValue('済');
+    sheet.getRange(rowIdx, COL_REDEEMED_AT + 1).setValue(new Date());
+  });
+
+  // 在庫(Total/Reserved)減算
+  var invData = inventorySheet.getDataRange().getValues();
+  for (var j = 1; j < invData.length; j++) {
+    var invItem = invData[j][0];
+    if (itemsToReduce[invItem]) {
+      var reduceCount = itemsToReduce[invItem];
+      var currentTotal = Number(invData[j][1]);
+      var currentReserved = Number(invData[j][2]);
+      inventorySheet.getRange(j + 1, 2).setValue(currentTotal - reduceCount); 
+      inventorySheet.getRange(j + 1, 3).setValue(currentReserved - reduceCount);
+    }
+  }
+  lock.releaseLock();
+  return { success: true, message: '受渡完了', name: customerName, ticketNo: ticketNo };
+}
+
+// =========================================================
+// [ 共通ヘルパー関数群 ]
+// =========================================================
+
+function checkPass(input) {
+  var settings = getSettingsMap();
+  return String(input) === String(settings['admin_pass']);
+}
+
+function getNextOrderNumber() {
+  var props = PropertiesService.getScriptProperties();
+  var current = Number(props.getProperty('ORDER_NUM') || 0);
+  var next = current + 1;
+  if (next > 999) next = 1;
+  props.setProperty('ORDER_NUM', next.toString());
+  return ("000" + next).slice(-3);
+}
+
+function getSettingsMap() {
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var sheet = ss.getSheetByName(SHEET_SETTINGS);
+  var data = sheet.getDataRange().getValues();
+  var map = {};
+  for(var i=0; i<data.length; i++) map[data[i][0]] = data[i][1];
+  return map;
+}
+
+function getAvailableInventory() {
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var sheet = ss.getSheetByName(SHEET_INVENTORY);
+  var data = sheet.getDataRange().getValues();
+  var list = [];
+  for (var i = 1; i < data.length; i++) {
+    var total = Number(data[i][1]);
+    var reserved = Number(data[i][2]);
+    if (total > reserved) {
+      list.push({ item: data[i][0], price: data[i][3], available: total - reserved });
+    }
+  }
+  return list;
+}
+
+function getInventoryMap(sheet) {
+  var data = sheet.getDataRange().getValues();
+  var map = {};
+  for(var i=1; i<data.length; i++) {
+    map[data[i][0]] = { 
+      total_stock: Number(data[i][1]), 
+      reserved: Number(data[i][2]), 
+      price: Number(data[i][3]),
+      buffer: Number(data[i][4] || 0) // 5列目(Index 4)を追加
+    };
+  }
+  return map;
+}
+
+function generateRandomToken(n) { return Utilities.getUuid().replace(/-/g,'').slice(0,n); }
+
+function countItems(itemArray) {
+    const counts = itemArray.reduce((acc, item) => {
+        acc[item] = (acc[item] || 0) + 1;
+        return acc;
+    }, {});
+    return Object.keys(counts).map(item => counts[item] > 1 ? `${item} × ${counts[item]}` : item);
+}
+
+function buildEmailBody(form, ticketNo, summaryItems, cost, qrUrl) {
+  var list = Object.keys(summaryItems).map(item => `<li>${item} × ${summaryItems[item].qty}</li>`).join('');
+  return `<div style="font-family:sans-serif; border-top: 4px solid #cc0000; padding:20px;">
+          <h2 style="color:#cc0000;">チケット発行完了</h2>
+          <p>${form.name} 様</p>
+          <p style="font-size:1.5em; font-weight:bold;">整理番号: ${ticketNo}</p>
+          <ul>${list}</ul>
+          <p><strong>合計: ${cost}円</strong></p>
+          <div style="text-align:center; margin:20px 0;">
+            <img src="${qrUrl}" width="180" style="border:1px solid #ddd;">
+            <p style="color:#666; font-size:0.9em;">呼出番号が表示されたら、<br>このQRコードをスタッフにご提示ください。</p>
+          </div>
+          </div>`;
+}
+
+// --- 7. 受渡スタッフ用：手動入力(整理番号)でのスキャン処理 ---
+function processManualRedemption(ticketNo, pass) {
+  if (!checkPass(pass)) return { success: false, message: 'パスワード不一致' };
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(5000); } catch(e) { return {success:false, message:'処理中です。再度お試しください。'}; }
+
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var sheet = ss.getSheetByName(SHEET_TICKETS);
+  var inventorySheet = ss.getSheetByName(SHEET_INVENTORY);
+  var data = sheet.getDataRange().getValues();
+  
+  var targetRows = [];
+  var itemsToReduce = {}; 
+  var customerName = "";
+  var foundTicketNo = "";
+
+  // 入力値の補完機能 (例: "1" -> "No.001", "12" -> "No.012")
+  var searchNo = String(ticketNo).trim();
+  if (!searchNo.toUpperCase().startsWith("NO.")) {
+    if (!isNaN(searchNo) && searchNo !== "") {
+       searchNo = "No." + ("000" + searchNo).slice(-3);
+    }
+  } else {
+    // "no.1" のような入力を "No.001" に補完
+    var numPart = searchNo.substring(3).trim();
+    if (!isNaN(numPart) && numPart !== "") {
+       searchNo = "No." + ("000" + numPart).slice(-3);
+    }
+  }
+
+  for (var i = 1; i < data.length; i++) {
+    // 補完した番号、または完全一致の番号で検索
+    if (data[i][COL_TICKET_NO] === searchNo || data[i][COL_TICKET_NO] === ticketNo) {
+      if (data[i][COL_DELIVERY_STATUS] !== '完') {
+        targetRows.push(i + 1);
+        var item = data[i][COL_ITEM];
+        itemsToReduce[item] = (itemsToReduce[item] || 0) + 1;
+        if (!customerName) customerName = data[i][COL_NAME];
+        if (!foundTicketNo) foundTicketNo = data[i][COL_TICKET_NO];
+      }
+    }
+  }
+  
+  if (targetRows.length === 0) {
+    lock.releaseLock();
+    return { success: false, message: searchNo + ' の有効な未受渡チケットがありません。' };
+  }
+  
+  targetRows.forEach(rowIdx => {
+    sheet.getRange(rowIdx, COL_DELIVERY_STATUS + 1).setValue('完');
+    sheet.getRange(rowIdx, COL_REDEEMED + 1).setValue('済');
+    sheet.getRange(rowIdx, COL_REDEEMED_AT + 1).setValue(new Date());
+  });
+
+  // 在庫(Total/Reserved)減算
+  var invData = inventorySheet.getDataRange().getValues();
+  for (var j = 1; j < invData.length; j++) {
+    var invItem = invData[j][0];
+    if (itemsToReduce[invItem]) {
+      var reduceCount = itemsToReduce[invItem];
+      var currentTotal = Number(invData[j][1]);
+      var currentReserved = Number(invData[j][2]);
+      inventorySheet.getRange(j + 1, 2).setValue(currentTotal - reduceCount); 
+      inventorySheet.getRange(j + 1, 3).setValue(currentReserved - reduceCount);
+    }
+  }
+  lock.releaseLock();
+  return { success: true, message: '受渡完了', name: customerName, ticketNo: foundTicketNo };
+}

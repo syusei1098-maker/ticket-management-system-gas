@@ -1,0 +1,26 @@
+RedirectToStaff.html
+
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <title>引換処理へ誘導</title>
+    <style>
+      body { font-family: sans-serif; text-align: center; padding: 50px; }
+    </style>
+    <script>
+      // ページロード時に自動的にRedeemStaff.htmlへトークンを渡してリダイレクト
+      const WEB_APP_URL = "<?= ScriptApp.getService().getUrl() ?>";
+      const TOKEN = "<?= ticketToken ?>";
+      
+      window.onload = function() {
+        const staffUrl = WEB_APP_URL + "?action=redeem_staff&ticket=" + TOKEN;
+        window.location.replace(staffUrl);
+      };
+    </script>
+  </head>
+  <body>
+    <h2>引換処理画面へ誘導中...</h2>
+    <p>この画面はスタッフ専用です。自動的に引換画面に遷移しています。</p>
+  </body>
+</html>

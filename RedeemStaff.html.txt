@@ -1,0 +1,130 @@
+RedeemStaff.html
+
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <title>スタッフ認証 - 調理完了登録</title>
+    <style>
+      body { font-family: sans-serif; background-color: #f4f4f4; padding: 20px; text-align: center; }
+      .card { background: white; max-width: 400px; margin: 0 auto; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+      input { padding: 10px; width: 80%; margin-bottom: 10px; font-size: 16px; text-align: center; }
+      button { padding: 10px 20px; font-size: 16px; background-color: #3498db; color: white; border: none; border-radius: 4px; width: 100%; cursor: pointer; }
+      .hidden { display: none; }
+      .status { font-weight: bold; font-size: 1.5em; padding: 15px; border-radius: 4px; margin-bottom: 20px; }
+      .status-ok { background-color: #d4edda; color: #155724; }
+      .status-used { background-color: #f8d7da; color: #721c24; }
+      .status-error { background-color: #e2e3e5; color: #383d41; }
+      .detail { text-align: left; margin: 15px 0; border-top: 1px solid #eee; padding-top: 10px; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h2>キッチン 調理完了登録</h2>
+
+      <div id="auth-form">
+        <p>スタッフ管理パスワードを入力してください。</p>
+        <input type="password" id="adminPass" placeholder="Admin Password" />
+        <button onclick="authenticate()">認証してQR読み取り画面へ</button>
+        <p id="auth-msg" style="color:red; margin-top:10px;"></p>
+      </div>
+
+      <div id="scan-area" class="hidden">
+        <h3>✅ 認証済：QRコードを読み取ってください</h3>
+        <p style="color:#2980b9;">顧客のQRコードを読み込むと、調理完了が登録され、<br>呼び出し画面に表示されます。</p>
+        <div id="result-display"></div>
+        <p style="margin-top:20px;"><a href="javascript:void(0);" onclick="resetAuth()">パスワード再入力/リセット</a></p>
+      </div>
+    </div>
+
+    <script>
+      const CORRECT_PASS = "<?= staffPass ?>";
+      const URL_PARAMS = new URLSearchParams(window.location.search);
+      const AUTH_KEY = 'staff_authenticated';
+
+      function authenticate() {
+        const inputPass = document.getElementById('adminPass').value;
+        const msg = document.getElementById('auth-msg');
+
+        if (inputPass === CORRECT_PASS) {
+          sessionStorage.setItem(AUTH_KEY, CORRECT_PASS); 
+          msg.innerText = "認証成功。画面を切り替えます...";
+          // スキャンエリアを表示し、認証フォームを隠す
+          document.getElementById('auth-form').classList.add('hidden');
+          document.getElementById('scan-area').classList.remove('hidden');
+          checkURLAndScan();
+        } else {
+          msg.innerText = "パスワードが間違っています。";
+        }
+      }
+
+      function resetAuth() {
+         sessionStorage.removeItem(AUTH_KEY);
+         window.location.replace(window.location.pathname + '?action=redeem_staff');
+      }
+
+      function checkURLAndScan() {
+        const token = URL_PARAMS.get('ticket');
+        const pass = sessionStorage.getItem(AUTH_KEY);
+
+        if (token && pass) {
+          // チケットトークンがあり、かつ認証済みの場合のみ実行
+          document.getElementById('result-display').innerHTML = '<p style="color:#f39c12;">調理完了処理中...</p>';
+          
+          google.script.run
+            .withSuccessHandler(displayRedemptionResult)
+            .withFailureHandler(handleError)
+            .executeAuthenticatedRedemption(token, pass);
+
+          // URLパラメータをクリアし、再読み込みしても処理が繰り返されないようにする
+          history.replaceState(null, null, window.location.pathname + '?action=redeem_staff');
+
+        } else if (pass) {
+          // 認証済みだがトークンがない（初期状態または処理後）
+          document.getElementById('auth-form').classList.add('hidden');
+          document.getElementById('scan-area').classList.remove('hidden');
+          document.getElementById('result-display').innerHTML = '<p style="color:#2ecc71;">待機中：新しいQRコードを読み込んでください。</p>';
+        }
+      }
+
+      function displayRedemptionResult(res) {
+        const container = document.getElementById('result-display');
+        const info = res.info;
+        
+        let html = '';
+        if (res.success) {
+            html += '<div class="status status-ok">調理完了</div>';
+            html += `<p class="message">${res.message}</p>`;
+        } else if (info && info.status === '済') {
+            html += '<div class="status status-used">既に調理完了済み</div>';
+            html += `<p class="message">${res.message}</p>`;
+        } else if (info && info.status === '完') {
+            html += '<div class="status status-used">既に受け渡し完了済み</div>';
+            html += `<p class="message">${res.message}</p>`;
+        } else {
+            html += '<div class="status status-error">処理失敗</div>';
+            html += `<p class="message">${res.message}</p>`;
+        }
+        
+        if (info && info.isValid) {
+            html += '<div class="detail">';
+            html += `<p><strong>商品:</strong> ${info.item}</p>`;
+            html += `<p><strong>購入者:</strong> ${info.name}</p>`;
+            html += `<p><strong>TEL:</strong> ${info.phone}</p>`;
+            html += `</div>`;
+        }
+
+        container.innerHTML = html;
+      }
+
+      function handleError(error) {
+        document.getElementById('result-display').innerHTML = `<p style="color:red;">通信エラー: ${error.message}</p>`;
+      }
+
+      // ページロード時に認証状態を確認
+      if (sessionStorage.getItem(AUTH_KEY)) {
+        checkURLAndScan();
+      }
+    </script>
+  </body>
+</html>

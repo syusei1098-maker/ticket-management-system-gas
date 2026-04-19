@@ -1,0 +1,85 @@
+CallDisplay.html
+
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <title>呼出ディスプレイ</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="30"> <style>
+    :root {
+        --main-red: #CC0000;
+        --main-black: #000000;
+        --main-bg: #111111;
+        --main-card: #222222;
+        --text-white: #ffffff;
+    }
+    body { font-family: sans-serif; background-color: var(--main-bg); margin: 0; padding: 0; color: var(--text-white); }
+    
+    header { background-color: var(--main-red); color: white; padding: 20px; text-align: center; }
+    h1 { margin: 0; font-size: 2em; font-weight: 800; letter-spacing: 2px; }
+
+    .container { padding: 20px; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; }
+    
+    .ticket-card { 
+      background: var(--main-card); 
+      border-left: 8px solid var(--main-red); 
+      border-radius: 6px; 
+      padding: 20px; 
+      box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+      animation: fadeIn 0.5s ease-in;
+    }
+
+    .status-label { color: #f39c12; font-weight: bold; font-size: 1.2em; display: block; margin-bottom: 5px; }
+    .ticket-no { font-size: 3.5em; font-weight: 800; color: white; margin: 0; line-height: 1.1; }
+    .customer-name { font-size: 1.2em; color: #ccc; margin-top: 5px; }
+    .items { margin-top: 15px; border-top: 1px solid #444; padding-top: 10px; color: #eee; font-size: 1em; }
+
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    
+    .empty-msg { grid-column: 1 / -1; text-align: center; color: #666; font-size: 1.5em; margin-top: 50px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>READY TO PICK UP</h1>
+    <p style="margin:5px 0 0 0; font-size:1.2em;">出来上がりお呼び出し</p>
+  </header>
+
+  <div id="list-container" class="container">
+    <div class="empty-msg">読み込み中...</div>
+  </div>
+
+  <script>
+    function load() {
+      google.script.run.withSuccessHandler(render).getCallList();
+    }
+
+    function render(list) {
+      const container = document.getElementById('list-container');
+      container.innerHTML = '';
+      
+      if (list.length === 0) {
+        container.innerHTML = '<div class="empty-msg">現在呼び出し中の番号はありません</div>';
+        return;
+      }
+      
+      list.forEach(t => {
+        const div = document.createElement('div');
+        div.className = 'ticket-card';
+        div.innerHTML = `
+          <span class="status-label">出来上がり</span>
+          <div class="ticket-no">${t.no}</div>
+          <div class="customer-name">${t.name} 様</div>
+          <div class="items">${t.items}</div>
+        `;
+        container.appendChild(div);
+      });
+    }
+
+    // 初回実行と定期実行
+    load();
+    setInterval(load, 15000); 
+  </script>
+</body>
+</html>

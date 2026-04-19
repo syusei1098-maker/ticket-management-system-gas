@@ -1,0 +1,197 @@
+index.html
+
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <title>商品交換チケット発行</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <style>
+      :root {
+        --main-red: #CC0000;
+        --main-black: #000000;
+        --main-dark: #333333;
+        --bg-light: #f4f4f4;
+        --bg-white: #ffffff;
+      }
+      body { font-family: "Helvetica Neue", Arial, sans-serif; background-color: var(--bg-light); color: var(--main-dark); margin: 0; padding: 0; }
+      
+      header { background-color: var(--main-red); color: white; padding: 15px 0; text-align: center; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
+      header h1 { margin: 0; font-size: 1.4em; font-weight: 700; letter-spacing: 1px; }
+
+      .container { max-width: 600px; margin: 20px auto; padding: 0 15px; }
+      .card { background: var(--main-white); border-radius: 4px; padding: 25px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); margin-bottom: 20px; border-top: 3px solid var(--main-dark); }
+      
+      label { display: block; font-weight: bold; margin-bottom: 5px; color: var(--main-black); font-size: 0.95em; }
+      .required-mark { color: var(--main-red); margin-left: 3px; }
+      
+      input, select { width: 100%; padding: 12px; margin-bottom: 20px; border: 1px solid #ccc; border-radius: 3px; font-size: 16px; box-sizing: border-box; background: #fafafa; }
+      input:focus, select:focus { border-color: var(--main-red); outline: none; background: #fff; }
+
+      h3 { border-left: 5px solid var(--main-red); padding-left: 10px; color: var(--main-black); margin-top: 0; }
+      
+      .menu-item { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #eee; padding: 15px 0; }
+      .menu-info strong { font-size: 1.1em; }
+      .menu-price { color: var(--main-red); font-weight: bold; }
+      .qty-input { width: 60px; text-align: center; margin: 0; }
+
+      .btn-primary { width: 100%; padding: 15px; background-color: var(--main-red); color: white; border: none; border-radius: 3px; font-size: 1.1em; font-weight: bold; cursor: pointer; transition: background 0.3s; }
+      .btn-primary:hover { background-color: #a00000; }
+      .btn-primary:disabled { background-color: #ccc; cursor: not-allowed; }
+
+      .alert-box { background: #fff8e1; border: 1px solid #ffecb3; padding: 15px; border-radius: 4px; font-size: 0.9em; margin-bottom: 20px; }
+      
+      /* Result Screen */
+      .ticket-box { border: 2px solid var(--main-red); background: #fff; padding: 20px; text-align: center; border-radius: 4px; }
+      .ticket-no { font-size: 3em; font-weight: 800; color: var(--main-red); margin: 10px 0; line-height: 1; }
+      .screenshot-alert { background: var(--main-dark); color: #fff; padding: 8px; margin: 15px 0; border-radius: 3px; font-weight: bold; font-size: 0.9em; }
+      
+      .hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>商品交換チケット発行</h1>
+    </header>
+
+    <div class="container">
+      <div id="order-view">
+        <div class="card">
+          <form onsubmit="order(event)">
+            <h3>お客様情報</h3>
+            <label for="name">お名前<span class="required-mark">*</span></label>
+            <input type="text" id="name" placeholder="例：山田 太郎" required>
+            
+            <label for="phone">携帯電話番号<span class="required-mark">*</span></label>
+            <input type="tel" id="phone" placeholder="例：090-1234-5678" required>
+
+            <label for="email">メールアドレス <span id="email-req-mark" class="required-mark hidden">*</span></label>
+            <input type="email" id="email" placeholder="例：taro@example.com">
+            
+            <h3 style="margin-top:30px;">メニュー選択</h3>
+            <div id="menu-list">
+              <? inventoryList.forEach(function(inv){ ?>
+                <div class="menu-item">
+                  <div class="menu-info">
+                    <strong><?= inv.item ?></strong><br>
+                    <span class="menu-price"><?= inv.price ?>円</span> (残: <?= inv.available ?>)
+                  </div>
+                  <input type="number" class="qty-input qty" data-item="<?= inv.item ?>" min="0" max="<?= inv.available ?>" value="0">
+                </div>
+              <? }); ?>
+            </div>
+            
+            <h3 style="margin-top:30px;">受取方法</h3>
+            <div class="alert-box">
+              Googleの仕様により1日のメール配信数に上限があります。確実にチケットを受け取るため、<b>「画面表示（推奨）」</b>をお選びください。
+            </div>
+            <select id="method" onchange="toggleEmailReq()">
+              <option value="screen">画面表示（推奨：スクショ保存）</option>
+              <option value="email">メール受信</option>
+            </select>
+            
+            <button type="submit" id="btn" class="btn-primary">チケットを発行する</button>
+          </form>
+        </div>
+      </div>
+
+      <div id="result-view" class="hidden">
+        <div class="card">
+          <h2 style="text-align:center; color:var(--main-red); margin-top:0;">発行完了</h2>
+          <div class="ticket-box">
+            <p style="margin:0; font-weight:bold; color:#666;">整理番号</p>
+            <div class="ticket-no" id="res-no"></div>
+            <div class="screenshot-alert">📸 必ずこの画面をスクリーンショットしてください</div>
+            <div id="qr-area" style="display:flex; justify-content:center; margin:15px 0;"></div>
+            <div style="text-align:left; margin-top:15px; border-top:1px solid #eee; padding-top:10px;">
+              <strong>ご注文内容:</strong>
+              <ul id="summary-list" style="padding-left:20px; margin:5px 0;"></ul>
+              <p style="text-align:right; font-weight:bold; font-size:1.2em; margin:10px 0;">合計: <span id="res-cost"></span>円</p>
+            </div>
+          </div>
+          <p id="msg" style="text-align:center; margin-top:15px;"></p>
+          <div style="text-align:center; margin-top:30px;">
+            <a href="<?= ScriptApp.getService().getUrl() ?>" style="color:var(--main-red); font-weight:bold;">追加でチケットを発行する</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // 初期ロード時の設定
+      toggleEmailReq();
+
+      function toggleEmailReq() {
+        const method = document.getElementById('method').value;
+        const emailInput = document.getElementById('email');
+        const reqMark = document.getElementById('email-req-mark');
+        
+        if (method === 'email') {
+          emailInput.required = true;
+          reqMark.classList.remove('hidden');
+        } else {
+          emailInput.required = false;
+          reqMark.classList.add('hidden');
+        }
+      }
+
+      function order(e) {
+        e.preventDefault();
+        const btn = document.getElementById('btn');
+        btn.disabled = true;
+        btn.innerText = '処理中...';
+
+        var orders = [];
+        document.querySelectorAll('.qty').forEach(el => {
+          if(el.value > 0) orders.push({ item: el.dataset.item, qty: el.value });
+        });
+        
+        if(orders.length === 0) {
+           btn.disabled = false;
+           btn.innerText = 'チケットを発行する';
+           return alert('商品を1つ以上選択してください');
+        }
+
+        var data = {
+          name: document.getElementById('name').value,
+          email: document.getElementById('email').value,
+          phone: document.getElementById('phone').value,
+          method: document.getElementById('method').value,
+          orders: orders
+        };
+
+        google.script.run.withSuccessHandler(done).processTicketIssue(data);
+      }
+
+      function done(res) {
+        if(!res.success) {
+          alert(res.message);
+          const btn = document.getElementById('btn');
+          btn.disabled = false;
+          btn.innerText = 'チケットを発行する';
+          return;
+        }
+        
+        document.getElementById('order-view').classList.add('hidden');
+        document.getElementById('result-view').classList.remove('hidden');
+        document.getElementById('res-no').innerText = res.ticketNo;
+        document.getElementById('res-cost').innerText = res.totalCost.toLocaleString();
+        document.getElementById('msg').innerText = res.message;
+        
+        const summaryList = document.getElementById('summary-list');
+        summaryList.innerHTML = '';
+        Object.keys(res.summary).forEach(item => {
+          const li = document.createElement('li');
+          li.innerText = `${item} × ${res.summary[item].qty}`;
+          summaryList.appendChild(li);
+        });
+
+        if(res.redeemUrl) {
+          document.getElementById("qr-area").innerHTML = '';
+          new QRCode(document.getElementById("qr-area"), { text: res.redeemUrl, width: 180, height: 180 });
+        }
+      }
+    </script>
+  </body>
+</html>

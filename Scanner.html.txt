@@ -1,0 +1,251 @@
+Scanner.html
+
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <title>受渡スキャナー</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+  <style>
+    :root {
+        --main-red: #CC0000;
+        --main-black: #000000;
+        --bg-light: #f4f4f4;
+        --bg-white: #ffffff;
+    }
+    body { font-family: sans-serif; background-color: var(--main-light); margin: 0; padding: 0; color: #333; }
+    
+    header { background-color: var(--main-black); color: white; padding: 15px; text-align: center; }
+    h1 { margin: 0; font-size: 1.2em; color: var(--main-red); font-weight: 800; letter-spacing: 1px; }
+
+    .container { max-width: 500px; margin: 20px auto; padding: 15px; }
+    .card { background: var(--main-white); border-radius: 4px; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; }
+
+    input { width: 100%; padding: 12px; margin-bottom: 15px; box-sizing: border-box; border: 1px solid #ccc; font-size: 16px; text-align: center; border-radius: 3px;}
+    input:focus { border-color: var(--main-red); outline: none; }
+    
+    button { width: 100%; padding: 15px; background: var(--main-red); color: white; border: none; border-radius: 3px; font-weight: bold; font-size: 1.1em; cursor: pointer; }
+    button:hover { background: #a00000; }
+
+    /* Scanner specific */
+    #reader { width: 100%; border: 5px solid #eee; border-radius: 4px; overflow: hidden; background: black; }
+    
+    /* Zoom Slider */
+    .zoom-control { margin-top: 15px; display: none; }
+    .zoom-control label { display: block; font-weight: bold; margin-bottom: 5px; }
+    input[type=range] { width: 80%; accent-color: var(--main-red); }
+
+    /* Manual Input Section */
+    .manual-input-area { margin-top: 25px; padding-top: 20px; border-top: 2px dashed #ddd; }
+    .manual-input-flex { display: flex; gap: 10px; align-items: stretch; }
+    .manual-input-flex input { margin-bottom: 0; flex-grow: 1; }
+    .manual-input-flex button { width: auto; padding: 0 20px; white-space: nowrap; }
+
+    .result-box { margin-top: 20px; padding: 20px; border: 2px solid var(--main-red); border-radius: 8px; background: #fff; }
+    .success-msg { color: #2e7d32; font-weight: bold; font-size: 1.5em; margin: 10px 0; }
+    .ticket-info { font-size: 1.2em; margin-bottom: 20px; }
+
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <header><h1>TICKET SCANNER</h1></header>
+
+  <div class="container">
+    <div id="login-view" class="card">
+      <h2 style="margin-top:0;">スタッフログイン</h2>
+      <p style="font-size:0.9em; color:#666;">一度ログインすると連続使用できます</p>
+      <input type="password" id="pass" placeholder="パスワードを入力">
+      <button onclick="login()">ログイン開始</button>
+    </div>
+
+    <div id="scanner-view" class="card hidden">
+      <p style="font-weight:bold; margin-bottom:10px; color:var(--main-red);">① QRコードを読み取る</p>
+      <div id="reader"></div>
+      
+      <div id="zoom-area" class="zoom-control">
+        <label>ZOOM</label>
+        <input type="range" id="zoom-slider" min="1" max="5" step="0.1" value="1" oninput="applyZoom(this.value)">
+      </div>
+
+      <div class="manual-input-area">
+        <p style="font-weight:bold; margin-bottom:10px; color:var(--main-red);">② 整理番号を手動で入力する</p>
+        <p style="font-size:0.85em; color:#666; margin-top:0;">※「1」と入力すると「No.001」になります</p>
+        <div class="manual-input-flex">
+          <input type="text" id="manual-ticket-no" placeholder="例: 5 または No.005">
+          <button id="manual-btn" onclick="submitManual()">受渡</button>
+        </div>
+      </div>
+
+      <button onclick="stopScan()" style="background:#555; margin-top:25px;">中断して戻る</button>
+    </div>
+
+    <div id="result-view" class="card hidden">
+      <div class="result-box">
+        <div class="success-msg">受渡完了</div>
+        <div class="ticket-info">
+          <div id="res-ticket" style="font-weight:bold; font-size:1.4em; color:var(--main-red);"></div>
+          <div id="res-name" style="margin-top:5px;"></div>
+        </div>
+        <button onclick="resetScanner()">次の人を処理する</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let CACHED_PASS = '';
+    let html5QrcodeScanner = null;
+    let currentVideoTrack = null;
+
+    function login() {
+      const passInput = document.getElementById('pass').value;
+      if (!passInput) return alert('パスワードを入力してください');
+
+      google.script.run.withSuccessHandler(res => {
+        if (res.success) {
+          CACHED_PASS = passInput;
+          document.getElementById('login-view').classList.add('hidden');
+          startScanner();
+        } else {
+          alert('パスワードが違います');
+          document.getElementById('pass').value = '';
+        }
+      }).checkStaffLogin(passInput);
+    }
+
+    function startScanner() {
+      document.getElementById('scanner-view').classList.remove('hidden');
+      document.getElementById('result-view').classList.add('hidden');
+      document.getElementById('manual-ticket-no').value = ''; // 入力欄リセット
+
+      if (!html5QrcodeScanner) {
+        html5QrcodeScanner = new Html5Qrcode("reader");
+      }
+
+      const config = { 
+        fps: 10, 
+        qrbox: { width: 250, height: 250 },
+        videoConstraints: {
+           facingMode: "environment",
+           width: { min: 640, ideal: 1280, max: 1920 },
+           height: { min: 480, ideal: 720, max: 1080 }
+        }
+      };
+
+      html5QrcodeScanner.start(
+        { facingMode: "environment" }, 
+        config,
+        onScanSuccess,
+        onScanFailure
+      ).then(() => {
+        setupZoom();
+      }).catch(err => {
+        console.error(err);
+        // カメラ起動失敗時も手動入力は使えるようにする
+      });
+    }
+
+    function setupZoom() {
+      const zoomArea = document.getElementById('zoom-area');
+      const slider = document.getElementById('zoom-slider');
+      
+      if (html5QrcodeScanner) {
+         const videoElement = document.querySelector("#reader video");
+         if (videoElement && videoElement.srcObject) {
+            const track = videoElement.srcObject.getVideoTracks()[0];
+            const capabilities = track.getCapabilities();
+
+            if (capabilities.zoom) {
+               currentVideoTrack = track;
+               zoomArea.style.display = 'block';
+               slider.min = capabilities.zoom.min;
+               slider.max = capabilities.zoom.max;
+               slider.step = capabilities.zoom.step || 0.1;
+               slider.value = track.getSettings().zoom || 1;
+            }
+         }
+      }
+    }
+
+    function applyZoom(val) {
+      if (currentVideoTrack) {
+        currentVideoTrack.applyConstraints({ advanced: [{ zoom: parseFloat(val) }] });
+      }
+    }
+
+    // --- ① QRコードスキャン成功時 ---
+    function onScanSuccess(decodedText, decodedResult) {
+      if(html5QrcodeScanner) html5QrcodeScanner.pause();
+      let token = decodedText;
+      if(decodedText.includes('ticket=')) {
+        token = decodedText.split('ticket=')[1];
+      }
+      google.script.run.withSuccessHandler(showResult).processQrScan(token, CACHED_PASS);
+    }
+
+    function onScanFailure(error) { /* 無視 */ }
+
+    // --- ② 手動入力ボタン押下時 ---
+    function submitManual() {
+      const inputNo = document.getElementById('manual-ticket-no').value;
+      if(!inputNo) return alert('整理番号を入力してください');
+
+      const btn = document.getElementById('manual-btn');
+      btn.disabled = true;
+      btn.innerText = '処理中';
+
+      // 処理中にQRが誤反応しないよう一時停止
+      if(html5QrcodeScanner) {
+         try { html5QrcodeScanner.pause(); } catch(e){}
+      }
+
+      // 新しく追加した手動入力用関数を呼び出す
+      google.script.run.withSuccessHandler(res => {
+         btn.disabled = false;
+         btn.innerText = '受渡';
+         showResult(res);
+      }).processManualRedemption(inputNo, CACHED_PASS);
+    }
+
+    // --- 結果表示 ---
+    function showResult(res) {
+      document.getElementById('scanner-view').classList.add('hidden');
+      document.getElementById('result-view').classList.remove('hidden');
+      
+      if(html5QrcodeScanner) {
+        html5QrcodeScanner.stop().then(() => { html5QrcodeScanner.clear(); }).catch(e=>{});
+      }
+
+      const resBox = document.querySelector('.result-box');
+      if (res.success) {
+        resBox.style.borderColor = "var(--main-red)";
+        document.querySelector('.success-msg').innerText = "受渡完了";
+        document.querySelector('.success-msg').style.color = "#2e7d32";
+        document.getElementById('res-ticket').innerText = res.ticketNo;
+        document.getElementById('res-name').innerText = res.name + " 様";
+      } else {
+        resBox.style.borderColor = "#555";
+        document.querySelector('.success-msg').innerText = "エラー";
+        document.querySelector('.success-msg').style.color = "#c62828";
+        document.getElementById('res-ticket').innerText = "";
+        document.getElementById('res-name').innerText = res.message;
+      }
+    }
+
+    function resetScanner() {
+      html5QrcodeScanner = null;
+      startScanner();
+    }
+    
+    function stopScan() {
+        if(html5QrcodeScanner) {
+             html5QrcodeScanner.stop().then(() => { html5QrcodeScanner.clear(); }).catch(e=>{});
+        }
+        document.getElementById('scanner-view').classList.add('hidden');
+        document.getElementById('login-view').classList.remove('hidden');
+        CACHED_PASS = ''; 
+    }
+  </script>
+</body>
+</html>
